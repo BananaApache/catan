@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        /* Hex tiles */
+        .hex {
+            stroke: #333;
+            stroke-width: 2;
+        }
+
+        /* Interactive elements */
+        .vertex-zone {
+            fill: rgba(255, 255, 255, 0.1);
+            stroke: none;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .vertex-zone:hover {
+            opacity: 1;
+            fill: rgba(255, 255, 255, 0.3);
+        }
+
+        .edge-zone {
+            stroke: rgba(255, 255, 255, 0.1);
+            stroke-width: 8;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .edge-zone:hover {
+            opacity: 1;
+            stroke: rgba(255, 255, 255, 0.5);
+        }
+
+        /* Placed pieces */
+        .settlement {
+            fill: #FF6347;
+            stroke: #8B0000;
+            stroke-width: 2;
+        }
+
+        .city {
+            fill: #FF4500;
+            stroke: #8B0000;
+            stroke-width: 2;
+        }
+
+        .road {
+            stroke: #8B4513;
+            stroke-width: 6;
+            stroke-linecap: round;
+        }
+
+        /* Numbers */
+        .number-circle {
+            fill: #FFF;
+            stroke: #000;
+            stroke-width: 2;
+        }
+
+        .number-text {
+            fill: #000;
+            font-size: 16px;
+            font-weight: bold;
+            text-anchor: middle;
+            dominant-baseline: central;
+        }
+
+        .red-number {
+            fill: #FF0000;
+        }
+
+        button:hover {
+            background: #A0522D;
+        }
+
+        button.active {
+            background: #FF6347;
+        }
+
+        #info {
+            color: white;
+            margin-top: 10px;
+            font-size: 18px;
+        }
+    </style>
+</head>
+<body>
+
+    <svg id="board" width="800" height="700" viewBox="0 0 800 700">
+        <defs></defs>
+        <!-- Layer groups in order -->
+        <g id="hex-layer"></g>
+        <g id="interaction-layer"></g>
+        <g id="road-layer"></g>
+        <g id="settlement-layer"></g>
+    </svg>
+
+    <div id="controls">
+        <button id="settlement-btn" class="active">Place Settlement</button>
+        <button id="road-btn">Place Road</button>
+        <button id="clear-btn">Clear Board</button>
+    </div>
+
+    <script>
+        // Game state
+        let currentMode = 'settlement';
+        let settlements = new Set();
+        let roads = new Set();
+
+        // Board configuration
+        const hexRadius = 60;
+        const centerX = 400;
+        const centerY = 350;
+
+        // Catan board layout (19 hexes) - Classic 3-4-5-4-3 pattern
+        const hexLayout = [
+            // Row 1 (3 hexes) - Top row
+            {q: 0, r: -2, type: 'wood', number: 11},
+            {q: 1, r: -2, type: 'wheat', number: 12},
+            {q: 2, r: -2, type: 'sheep', number: 9},
+            
+            // Row 2 (4 hexes)
+            {q: -1, r: -1, type: 'brick', number: 4},
+            {q: 0, r: -1, type: 'stone', number: 6},
+            {q: 1, r: -1, type: 'wood', number: 5},
+            {q: 2, r: -1, type: 'wheat', number: 10},
+            
+            // Row 3 (5 hexes) - Middle row
+            {q: -2, r: 0, type: 'sheep', number: 9},
+            {q: -1, r: 0, type: 'brick', number: 11},
+            {q: 0, r: 0, type: 'desert'},
+            {q: 1, r: 0, type: 'wood', number: 3},
+            {q: 2, r: 0, type: 'stone', number: 8},
+            
+            // Row 4 (4 hexes)
+            {q: -2, r: 1, type: 'sheep', number: 8},
+            {q: -1, r: 1, type: 'wheat', number: 10},
+            {q: 0, r: 1, type: 'brick', number: 5},
+            {q: 1, r: 1, type: 'stone', number: 4},
+            
+            // Row 5 (3 hexes) - Bottom row
+            {q: -2, r: 2, type: 'wheat', number: 6},
+            {q: -1, r: 2, type: 'sheep', number: 2},
+            {q: 0, r: 2, type: 'wood', number: 3}
+        ];
+
+        // Convert axial coordinates to pixel coordinates (pointy-top hexagons)
+        function axialToPixel(q, r) {
+            const x = centerX + hexRadius * Math.sqrt(3) * (q + r/2);
+            const y = centerY + hexRadius * (3/2) * r;
+            return {x, y};
+        }
+
+        // Generate hexagon points (rotated 90 degrees - pointy top)
+        function getHexPoints(centerX, centerY) {
+            const points = [];
+            for (let i = 0; i < 6; i++) {
+                const angle = Math.PI / 3 * i + Math.PI / 2; // Add 90 degree rotation
+                const x = centerX + hexRadius * Math.cos(angle);
+                const y = centerY + hexRadius * Math.sin(angle);
+                points.push(`${x},${y}`);
+            }
+            return points.join(' ');
+        }
+
+        // Get hex vertices (rotated 90 degrees - pointy top)
+        function getHexVertices(centerX, centerY) {
+            const vertices = [];
+            for (let i = 0; i < 6; i++) {
+                const angle = Math.PI / 3 * i + Math.PI / 2; // Add 90 degree rotation
+                const x = centerX + hexRadius * Math.cos(angle);
+                const y = centerY + hexRadius * Math.sin(angle);
+                vertices.push({x, y, id: `${Math.round(x)},${Math.round(y)}`});
+            }
+            return vertices;
+        }
+
+        // Get hex edges
+        function getHexEdges(centerX, centerY) {
+            const vertices = getHexVertices(centerX, centerY);
+            const edges = [];
+            for (let i = 0; i < 6; i++) {
+                const start = vertices[i];
+                const end = vertices[(i + 1) % 6];
+                const id = `${Math.round(start.x)},${Math.round(start.y)}-${Math.round(end.x)},${Math.round(end.y)}`;
+                edges.push({start, end, id});
+            }
+            return edges;
+        }
+
+        // Initialize board
+        function initBoard() {
+            const hexLayer = document.getElementById('hex-layer');
+            const interactionLayer = document.getElementById('interaction-layer');
+            const allVertices = new Map();
+            const allEdges = new Map();
+
+            // Create hexes
+            hexLayout.forEach(hex => {
+                const {x, y} = axialToPixel(hex.q, hex.r);
+                
+                // Create hex polygon with background color
+                const hexElement = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+                hexElement.setAttribute('points', getHexPoints(x, y));
+                hexElement.setAttribute('class', 'hex');
+                
+                // Set background colors for each resource type
+                const colors = {
+                    brick: '#CD853F',
+                    wood: '#228B22', 
+                    wheat: '#DAA520',
+                    stone: '#708090',
+                    sheep: '#9ACD32',
+                    desert: '#DEB887'
+                };
+                hexElement.setAttribute('fill', colors[hex.type] || '#4a7c59');
+                hexLayer.appendChild(hexElement);
+
+                // Add centered image for each hex type
+                const image = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+                const imageSize = 120;
+                image.setAttribute('x', x - imageSize / 2);
+                image.setAttribute('y', y - imageSize / 2);
+                image.setAttribute('width', imageSize);
+                image.setAttribute('height', imageSize);
+                image.setAttribute('href', `./client/public/images/${hex.type}.png`);
+                image.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+                hexLayer.appendChild(image);
+
+                // Add number token for resource hexes
+                if (hex.number) {
+                    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                    circle.setAttribute('cx', x);
+                    circle.setAttribute('cy', y);
+                    circle.setAttribute('r', 18);
+                    circle.setAttribute('class', 'number-circle');
+                    hexLayer.appendChild(circle);
+
+                    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                    text.setAttribute('x', x);
+                    text.setAttribute('y', y);
+                    text.setAttribute('class', `number-text ${(hex.number === 6 || hex.number === 8) ? 'red-number' : ''}`);
+                    text.textContent = hex.number;
+                    hexLayer.appendChild(text);
+                }
+
+                // Collect vertices and edges
+                const vertices = getHexVertices(x, y);
+                const edges = getHexEdges(x, y);
+
+                vertices.forEach(vertex => {
+                    allVertices.set(vertex.id, vertex);
+                });
+
+                edges.forEach(edge => {
+                    allEdges.set(edge.id, edge);
+                });
+            });
+
+            // Create interactive vertex zones
+            allVertices.forEach(vertex => {
+                const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                circle.setAttribute('cx', vertex.x);
+                circle.setAttribute('cy', vertex.y);
+                circle.setAttribute('r', 13);
+                circle.setAttribute('class', 'vertex-zone');
+                circle.setAttribute('data-vertex-id', vertex.id);
+                circle.addEventListener('click', handleVertexClick);
+                interactionLayer.appendChild(circle);
+            });
+
+            // Create interactive edge zones
+            allEdges.forEach(edge => {
+                const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                
+                x1 = edge.start.x;
+                y1 = edge.start.y;
+                x2 = edge.end.x;
+                y2 = edge.end.y;
+
+                const trim = 5; // how much to trim from each end
+
+                // Calculate unit vector
+                const dx = x2 - x1;
+                const dy = y2 - y1;
+                const len = Math.hypot(dx, dy);
+                const ux = dx / len;
+                const uy = dy / len;
+
+                // Apply trim
+                const tx1 = x1 + ux * trim;
+                const ty1 = y1 + uy * trim;
+                const tx2 = x2 - ux * trim;
+                const ty2 = y2 - uy * trim;
+
+                line.setAttribute('x1', tx1);
+                line.setAttribute('y1', ty1);
+                line.setAttribute('x2', tx2);
+                line.setAttribute('y2', ty2);
+                line.setAttribute('class', 'edge-zone');
+                line.setAttribute('data-edge-id', edge.id);
+                line.addEventListener('click', handleEdgeClick);
+                interactionLayer.appendChild(line);
+            });
+        }
+
+        // Handle vertex clicks (settlements)
+        function handleVertexClick(event) {
+            if (currentMode !== 'settlement') return;
+
+            const vertexId = event.target.getAttribute('data-vertex-id');
+            if (settlements.has(vertexId)) return; // Already has settlement
+
+            const [x, y] = vertexId.split(',').map(Number);
+            
+            // Create settlement
+            const settlement = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+            const size = 8;
+            const points = [
+                `${x},${y-size}`,      // Top
+                `${x+size},${y+size}`, // Bottom right
+                `${x-size},${y+size}`  // Bottom left
+            ].join(' ');
+            
+            settlement.setAttribute('points', points);
+            settlement.setAttribute('class', 'settlement');
+            settlement.setAttribute('data-vertex-id', vertexId);
+            
+            // Add to settlement layer instead of main board
+            document.getElementById('settlement-layer').appendChild(settlement);
+            settlements.add(vertexId);
+        }
+
+        // Handle edge clicks (roads)
+        function handleEdgeClick(event) {
+            if (currentMode !== 'road') return;
+
+            const edgeId = event.target.getAttribute('data-edge-id');
+            if (roads.has(edgeId)) return; // Already has road
+
+            const [start, end] = edgeId.split('-');
+            const [x1, y1] = start.split(',').map(Number);
+            const [x2, y2] = end.split(',').map(Number);
+
+            const trim = 5; // how much to trim from each end
+
+            // Calculate unit vector
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const len = Math.hypot(dx, dy);
+            const ux = dx / len;
+            const uy = dy / len;
+
+            // Apply trim
+            const tx1 = x1 + ux * trim;
+            const ty1 = y1 + uy * trim;
+            const tx2 = x2 - ux * trim;
+            const ty2 = y2 - uy * trim;
+            
+            // Create road
+            const road = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            road.setAttribute('x1', tx1);
+            road.setAttribute('y1', ty1);
+            road.setAttribute('x2', tx2);
+            road.setAttribute('y2', ty2);
+            road.setAttribute('class', 'road');
+            road.setAttribute('data-edge-id', edgeId);
+            
+            // Add to road layer instead of main board
+            document.getElementById('road-layer').appendChild(road);
+            roads.add(edgeId);
+        }
+
+        // Mode switching
+        document.getElementById('settlement-btn').addEventListener('click', () => {
+            currentMode = 'settlement';
+            document.querySelectorAll('button').forEach(btn => btn.classList.remove('active'));
+            document.getElementById('settlement-btn').classList.add('active');
+        });
+
+        document.getElementById('road-btn').addEventListener('click', () => {
+            currentMode = 'road';
+            document.querySelectorAll('button').forEach(btn => btn.classList.remove('active'));
+            document.getElementById('road-btn').classList.add('active');
+        });
+
+        // Clear board
+        document.getElementById('clear-btn').addEventListener('click', () => {
+            document.getElementById('road-layer').innerHTML = '';
+            document.getElementById('settlement-layer').innerHTML = '';
+            settlements.clear();
+            roads.clear();
+        });
+
+        // Initialize the board
+        initBoard();
+    </script>
+</body>
+</html>
