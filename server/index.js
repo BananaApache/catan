@@ -44,6 +44,7 @@ io.on("connection", (socket) => {
             settlements: [],
             cities: [],
             roads: [],
+            victoryPoints: 0,
         };
 
         games[roomId].players[socket.id] = player;
@@ -88,12 +89,20 @@ io.on("connection", (socket) => {
         io.to(roomId).emit("clearDiceRoll");
     });
 
+    //~ update initial turn
     socket.on("updateInitialTurn", ({ roomId, currentTurnId, players, initialTurnIndex}) => {
         games[roomId].players = players;
         games[roomId].currentTurn = currentTurnId;
 
         io.to(roomId).emit('updatePlayers', { players });
         io.to(roomId).emit('updateInitialTurn', { currentTurnId, initialTurnIndex });
+    })
+
+    //~ move robber
+    socket.on("robber", ({ roomId, players }) => {
+        games[roomId].players = players;
+
+        io.to(roomId).emit("robber", { players });
     })
 
     //~ Getting player list

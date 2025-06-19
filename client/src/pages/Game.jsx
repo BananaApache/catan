@@ -5,17 +5,28 @@ import socket from '../socket';
 export default function Game() {
   const { id: roomId } = useParams();
   const [players, setPlayers] = useState({});
+  const [currentTurnId, setCurrentTurnId] = useState(null);
+  const [currentMode, setCurrentMode] = useState('settlement'); // 'settlement' or 'road'
+  const [diceRoll, setDiceRoll] = useState("");
+  const [isInitialPlacement, setIsInitialPlacement] = useState(true);
+  const [initialTurnIndex, setInitialTurnIndex] = useState(0);
+  const [showDiscardUI, setShowDiscardUI] = useState(false);
+  const [discardRequired, setDiscardRequired] = useState(0);
+  const [victoryPoints, setVictoryPoints] = useState(0);
+  const [showTradeUI, setShowTradeUI] = useState(false);
   const [gameState, setGameState] = useState({
     hexLayout: [],
     roads: new Set(),
     settlements: new Set(),
     cities: new Set()
   });
-  const [currentTurnId, setCurrentTurnId] = useState(null);
-  const [currentMode, setCurrentMode] = useState('settlement'); // 'settlement' or 'road'
-  const [diceRoll, setDiceRoll] = useState("");
-  const [isInitialPlacement, setIsInitialPlacement] = useState(true);
-  const [initialTurnIndex, setInitialTurnIndex] = useState(0);
+  const [discardedResources, setDiscardedResources] = useState({
+    wood: 0,
+    brick: 0,
+    sheep: 0,
+    wheat: 0,
+    stone: 0
+  });
 
   const currentTurnIdRef = useRef('');
   const currentModeRef = useRef('settlement');
@@ -26,6 +37,7 @@ export default function Game() {
   const initialTurnIndexRef = useRef(0);
   const isInitialPlacementRef = useRef(true);
   const diceRollRef = useRef("");
+  const victoryPointsRef = useRef(0);
 
   const hexRadius = 60;
   const centerX = 400;
@@ -87,6 +99,23 @@ export default function Game() {
         console.log("Current turn updated to:", currentTurnId);
       }
     });
+
+    socket.on('robber', ({ players }) => {
+      setPlayers(players);
+      playersRef.current = players;
+
+      const totalResources = Object.values(players[socket.id].playerResources).reduce((acc, i) => acc + i, 0);
+
+      if (totalResources > 7) {
+        const discardCount = Math.floor(totalResources / 2);
+
+        setDiscardRequired(discardCount);
+        setDiscardedResources({ wood: 0, brick: 0, sheep: 0, wheat: 0, stone: 0 });
+        setShowDiscardUI(true);
+      }
+
+      console.log("Robber moved, updated players:", players);
+    })
 
     socket.on('boardUpdate', ({ gameState }) => {
       // document.getElementById('road-layer').innerHTML = '';
@@ -282,6 +311,7 @@ export default function Game() {
             circle.setAttribute('cy', y);
             circle.setAttribute('r', 18);
             circle.setAttribute('class', 'number-circle');
+            circle.addEventListener('click', moveRobber);
             hexLayer.appendChild(circle);
 
             const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -433,7 +463,8 @@ export default function Game() {
               stone: player.playerResources.stone - 3
             },
             cities: [...(player.cities || []), newCity],
-            settlements: (player.settlements || []).filter(s => s.vertexId !== vertexId)
+            settlements: (player.settlements || []).filter(s => s.vertexId !== vertexId),
+            victoryPoints: (player.victoryPoints || 0) + 1
           }
         };
         setPlayers(updatedPlayersState);
@@ -450,9 +481,7 @@ export default function Game() {
         playersRef.current[socket.id].playerResources.sheep < 1 ||
         playersRef.current[socket.id].playerResources.wheat < 1
       ) return; // not enough to build
-
-
-
+      
       const vertexId = event.target.getAttribute('data-vertex-id');
       if (settlements.has(vertexId)) return; // Already has settlement
 
@@ -517,7 +546,8 @@ export default function Game() {
             sheep: playersRef.current[socket.id].playerResources.sheep - 1,
             wheat: playersRef.current[socket.id].playerResources.wheat - 1
           },
-          settlements: [...(playersRef.current[socket.id].settlements || []), newSettlement]
+          settlements: [...(playersRef.current[socket.id].settlements || []), newSettlement],
+          victoryPoints: (playersRef.current[socket.id].victoryPoints || 0) + 1
         }
       };
 
@@ -531,79 +561,116 @@ export default function Game() {
         placeFirstRoad(event);
         return;
       }
-      if (currentModeRef.current !== 'road') return;
-      if (currentTurnIdRef.current !== socket.id) return; // Not current player's turn
-      if (settlements.size === 0) return; // Can't place roads without settlements
+      if (currentModeRef.current !== 'road') return
+      if (currentTurnIdRef.current !== socket.id) return // Not current player's turn
       if (
         playersRef.current[socket.id].playerResources.wood < 1 || 
         playersRef.current[socket.id].playerResources.brick < 1
-      ) return; // not enough to build
+      ) return // not enough to build
 
       const edgeId = event.target.getAttribute('data-edge-id');
       if (roads.has(edgeId)) return; // Already has road
 
       const [start, end] = edgeId.split('-');
-      const [x1, y1] = start.split(',').map(Number);
-      const [x2, y2] = end.split(',').map(Number);
 
-      const trim = 5; // how much to trim from each end
+      const ownsBuildingConnected = (gameStateRef.current.settlements || [])
+      .concat(gameStateRef.current.cities || [])
+      .some(building =>
+        building.playerId === socket.id &&
+        (building.vertexId === start || building.vertexId === end)
+      );
 
-      // Calculate unit vector
-      const dx = x2 - x1;
-      const dy = y2 - y1;
-      const len = Math.hypot(dx, dy);
-      const ux = dx / len;
-      const uy = dy / len;
+    const ownsRoadConnected = (gameStateRef.current.roads || [])
+    .some(road => {
+      if (road.playerId !== socket.id) return false;
+      const [roadStart, roadEnd] = road.edgeId.split('-');
+      return (
+        roadStart === start ||
+        roadStart === end ||
+        roadEnd === start ||
+        roadEnd === end
+      );
+    });
 
-      // Apply trim
-      const tx1 = x1 + ux * trim;
-      const ty1 = y1 + uy * trim;
-      const tx2 = x2 - ux * trim;
-      const ty2 = y2 - uy * trim;
-      
-      // Create road
-      const road = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      road.setAttribute('x1', tx1);
-      road.setAttribute('y1', ty1);
-      road.setAttribute('x2', tx2);
-      road.setAttribute('y2', ty2);
-      road.setAttribute('class', 'road');
-      road.setAttribute('data-edge-id', edgeId);
-      road.style.stroke = playersRef.current[socket.id].playerColor; // Use player's color
-      
-      // Add to road layer instead of main board
-      document.getElementById('road-layer').appendChild(road);
-      roads.add(edgeId);
+    if (!ownsBuildingConnected && !ownsRoadConnected) {
+      console.log("Edge is not connected to your own building or road.");
+      return;
+    }
 
-      const newRoad = {
-        tx1, ty1, tx2, ty2, edgeId,
-        color: playersRef.current[socket.id].playerColor,
-        playerId: socket.id
-      };
+    const [x1, y1] = start.split(',').map(Number);
+    const [x2, y2] = end.split(',').map(Number);
 
-      const updatedState = {
-        ...gameStateRef.current,
-        roads: [...gameStateRef.current.roads, newRoad]
-      };
+    const trim = 5; // how much to trim from each end
 
-      setGameState(updatedState);
-      gameStateRef.current = updatedState;
+    // Calculate unit vector
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const len = Math.hypot(dx, dy);
+    const ux = dx / len;
+    const uy = dy / len;
 
-      const updatedPlayersState = {
-        ...playersRef.current,
-        [socket.id]: {
-          ...playersRef.current[socket.id],
-          playerResources: {
-            ...playersRef.current[socket.id].playerResources,
-            wood: playersRef.current[socket.id].playerResources.wood - 1,
-            brick: playersRef.current[socket.id].playerResources.brick - 1
-          },
-          roads: [...(playersRef.current[socket.id].roads || []), newRoad]
-        }
-      };
+    // Apply trim
+    const tx1 = x1 + ux * trim;
+    const ty1 = y1 + uy * trim;
+    const tx2 = x2 - ux * trim;
+    const ty2 = y2 - uy * trim;
+    
+    // Create road
+    const road = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    road.setAttribute('x1', tx1);
+    road.setAttribute('y1', ty1);
+    road.setAttribute('x2', tx2);
+    road.setAttribute('y2', ty2);
+    road.setAttribute('class', 'road');
+    road.setAttribute('data-edge-id', edgeId);
+    road.style.stroke = playersRef.current[socket.id].playerColor; // Use player's color
+    
+    // Add to road layer instead of main board
+    document.getElementById('road-layer').appendChild(road);
+    roads.add(edgeId);
 
-      setPlayers(updatedPlayersState);
-      playersRef.current = updatedPlayersState;
+    const newRoad = {
+      tx1, ty1, tx2, ty2, edgeId,
+      color: playersRef.current[socket.id].playerColor,
+      playerId: socket.id
+    };
+
+    const updatedState = {
+      ...gameStateRef.current,
+      roads: [...gameStateRef.current.roads, newRoad]
+    };
+
+    setGameState(updatedState);
+    gameStateRef.current = updatedState;
+
+    const updatedPlayersState = {
+      ...playersRef.current,
+      [socket.id]: {
+        ...playersRef.current[socket.id],
+        playerResources: {
+          ...playersRef.current[socket.id].playerResources,
+          wood: playersRef.current[socket.id].playerResources.wood - 1,
+          brick: playersRef.current[socket.id].playerResources.brick - 1
+        },
+        roads: [...(playersRef.current[socket.id].roads || []), newRoad]
+      }
+    };
+
+    setPlayers(updatedPlayersState);
+    playersRef.current = updatedPlayersState;
+    }
+
+    // move robber
+    function moveRobber(event) {
+      if (currentTurnIdRef.current !== socket.id) return; // Not current player's turn
+      if (diceRollRef.current !== 7) return; // Only allow on dice roll or 7
+
+      const hex = event.target;
+      const hexPoints = hex.getAttribute('points').split(' ').map(p => p.split(',').map(Number));
+      const centerX = (hexPoints[0][0] + hexPoints[3][0]) / 2;
+      const centerY = (hexPoints[0][1] + hexPoints[3][1]) / 2;
+
+      console.log(hexPoints, centerX, centerY);
     }
 
     // Initialize the board
@@ -616,6 +683,7 @@ export default function Game() {
       socket.off('updateTurn');
       socket.off('updateInitialTurn');
       socket.off('rollDice');
+      socket.off('robber');      
     }
   }, []);
 
@@ -763,9 +831,18 @@ export default function Game() {
   function rollDice() {
     if (currentTurnIdRef.current !== socket.id) return; // Not current player's turn
 
+    // document.querySelector("#dice-btn").remove() // Disable button after rolling
+
     const myDiceRoll = Math.floor(Math.random() * 6) + 1 + Math.floor(Math.random() * 6) + 1; // Roll two dice
+
     console.log("Dice rolled:", myDiceRoll);
 
+    if (myDiceRoll === 7) {
+      console.log("Rolled a 7! Moving the robber.");
+
+      socket.emit('robber', { roomId, players: playersRef.current });
+    }
+    
     const settlementsArray = gameStateRef.current.settlements || [];
     const citiesArray = gameStateRef.current.cities || [];
 
@@ -890,7 +967,8 @@ export default function Game() {
       ...playersRef.current,
       [socket.id]: {
         ...playersRef.current[socket.id],
-        settlements: [...(playersRef.current[socket.id].settlements || []), newSettlement]
+        settlements: [...(playersRef.current[socket.id].settlements || []), newSettlement],
+        victoryPoints: (playersRef.current[socket.id].victoryPoints || 0) + 1
       }
     };
 
@@ -909,6 +987,31 @@ export default function Game() {
     if (roads.has(edgeId)) return; // Already has road
 
     const [start, end] = edgeId.split('-');
+
+    const ownsBuildingConnected = (gameStateRef.current.settlements || [])
+    .concat(Array.from(gameStateRef.current.cities || []))
+    .some(building =>
+      building.playerId === socket.id &&
+      (building.vertexId === start || building.vertexId === end)
+    );
+
+    const ownsRoadConnected = (Array.from(gameStateRef.current.roads || []))
+    .some(road => {
+      if (road.playerId !== socket.id) return false;
+      const [roadStart, roadEnd] = road.edgeId.split('-');
+      return (
+        roadStart === start ||
+        roadStart === end ||
+        roadEnd === start ||
+        roadEnd === end
+      );
+    });
+
+    if (!ownsBuildingConnected && !ownsRoadConnected) {
+      console.log("Edge is not connected to your own building or road.");
+      return;
+    }
+
     const [x1, y1] = start.split(',').map(Number);
     const [x2, y2] = end.split(',').map(Number);
 
@@ -967,10 +1070,49 @@ export default function Game() {
     playersRef.current = updatedPlayersState;
   }
 
+  function updateDiscard(resource, delta) {
+    setDiscardedResources(prev => ({
+      ...prev,
+      [resource]: Math.max(0, prev[resource] + delta)
+    }));
+  }
+
+  function submitDiscard() {
+    console.log("Submitting discarded resources:", discardedResources);
+
+    const updatedResources = { ...players[socket.id].playerResources };
+    Object.keys(discardedResources).forEach(resource => {
+      updatedResources[resource] -= discardedResources[resource];
+    });
+
+    setPlayers(prev => ({
+      ...prev,
+      [socket.id]: {
+        ...prev[socket.id],
+        playerResources: updatedResources
+      }
+    }));
+    playersRef.current[socket.id].playerResources = updatedResources;
+
+    socket.emit('updatePlayers', { roomId, players: playersRef.current });
+
+    setShowDiscardUI(false);
+  }
+
+  function trade() {
+    console.log("trade initiated")
+
+  
+  }
+
   return (
     <>
     <style>
       {`
+        .show {
+          display: none;
+        }
+
         /* Hex tiles */
         .hex {
             stroke: #333;
@@ -1028,6 +1170,7 @@ export default function Game() {
             fill: #FFF;
             stroke: #000;
             stroke-width: 2;
+            cursor: pointer;
         }
 
         .number-text {
@@ -1075,28 +1218,58 @@ export default function Game() {
     <p>Resources: </p>
     {
       players[socket.id] ?
-      <ul>
-        <li>wood: {players[socket.id].playerResources.wood}</li>
-        <li>brick: {players[socket.id].playerResources.brick}</li>
-        <li>sheep: {players[socket.id].playerResources.sheep}</li>
-        <li>wheat: {players[socket.id].playerResources.wheat}</li>
-        <li>stone: {players[socket.id].playerResources.stone}</li>
-      </ul>
+      <>
+        <ul>
+          <li>wood: {players[socket.id].playerResources.wood}</li>
+          <li>brick: {players[socket.id].playerResources.brick}</li>
+          <li>sheep: {players[socket.id].playerResources.sheep}</li>
+          <li>wheat: {players[socket.id].playerResources.wheat}</li>
+          <li>stone: {players[socket.id].playerResources.stone}</li>
+        </ul>
+        <p>Total Resources: { Object.values(players[socket.id].playerResources).reduce( (acc, i) => acc + i, 0 ) }</p>
+      </>
       :
-      <ul>
-        <li>wood: 0</li>
-        <li>brick: 0</li>
-        <li>sheep: 0</li>
-        <li>wheat: 0</li>
-        <li>stone: 0</li>
-      </ul>
+      <>
+        <ul>
+          <li>wood: 0</li>
+          <li>brick: 0</li>
+          <li>sheep: 0</li>
+          <li>wheat: 0</li>
+          <li>stone: 0</li>
+        </ul>
+        <p>Total Resources: 0</p>
+      </>
     }
+    <p>Victory Points: { players[socket.id]?.victoryPoints }</p>
     { diceRoll !== "" && players[currentTurnId]?.playerName && (
       <p id="logs">
         <span id="dice-roll">Player {players[currentTurnId]?.playerName} rolled a {diceRoll}</span>
       </p>
     )
     }
+
+    {showDiscardUI && (
+      <div className="modal">
+        <h3>Discard {discardRequired} Resources</h3>
+        <ul>
+          {Object.keys(discardedResources).map(resource => (
+            <li key={resource}>
+              {resource}: {players[socket.id].playerResources[resource]} &nbsp;
+              <button onClick={() => updateDiscard(resource, -1)} disabled={discardedResources[resource] === 0}>-</button>
+              {discardedResources[resource]}
+              <button onClick={() => updateDiscard(resource, 1)} disabled={discardedResources[resource] >= players[socket.id].playerResources[resource]}>+</button>
+            </li>
+          ))}
+        </ul>
+        <p>Total selected: {Object.values(discardedResources).reduce((a, b) => a + b, 0)} / {discardRequired}</p>
+        <button
+          onClick={submitDiscard}
+          disabled={Object.values(discardedResources).reduce((a, b) => a + b, 0) !== discardRequired}
+        >
+          Submit Discard
+        </button>
+      </div>
+    )}
 
     <svg id="board" width="800" height="700" viewBox="0 0 800 700">
         <defs></defs>
@@ -1105,6 +1278,16 @@ export default function Game() {
         <g id="road-layer"></g>
         <g id="settlement-layer"></g>
     </svg>
+
+    <div id="trade-players" className='show'>
+      <p>Trade with Other Players</p>
+        {Object.keys(players).filter(id => id !== socket.id).map(playerId => (
+          <li key={playerId}>
+            {players[playerId].playerName} <span style={{ color: players[playerId].playerColor }}>●</span>
+            <button onClick={() => trade(playerId)}>Trade</button>
+          </li>
+        ))}
+    </div>
 
     { currentTurnIdRef.current === socket.id && (
       <div id="controls">
@@ -1120,6 +1303,7 @@ export default function Game() {
             <button id="road-btn" className={currentMode === 'road' ? 'active' : ''} onClick={() => { currentModeRef.current = 'road'; setCurrentMode('road'); }}>Place Road</button>
             <button id="road-btn" className={currentMode === 'city' ? 'active' : ''} onClick={() => { currentModeRef.current = 'city'; setCurrentMode('city'); }}>Place City</button>
             <button id="dice-btn" onClick={rollDice}>Roll Dice</button>
+            <button id="dice-btn" onClick={document.querySelector("#trade-players").classList.toggle('show')}>Trade</button>
             <button id="submit-btn" onClick={ updateBoard }>End Turn</button>  
           </>)
         }
