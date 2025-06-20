@@ -757,7 +757,74 @@ export default function Game() {
       setPlayers(updatedPlayersState);
       playersRef.current = updatedPlayersState;
 
+      checkForLongestRoad(socket.id);
+
       addGlobalLog(`Player ${playersRef.current[socket.id].playerName} placed a road.`);
+    }
+
+    function checkForLongestRoad(playerId) {
+      const roads = (gameStateRef.current.roads || []).filter(r => r.playerId === playerId);
+      const settlements = gameStateRef.current.settlements || [];
+      const blockedVertices = new Set(
+        settlements.filter(s => s.playerId !== playerId).map(s => s.vertexId)
+      );
+
+      const graph = {};
+
+      roads.forEach(road => {
+        const [v1, v2] = road.edgeId.split('-');
+        if (!graph[v1]) graph[v1] = [];
+        if (!graph[v2]) graph[v2] = [];
+        graph[v1].push(v2);
+        graph[v2].push(v1);
+      });
+
+      function dfs(current, visitedEdges, blocked) {
+        let maxLen = 0;
+        const neighbors = graph[current] || [];
+
+        for (let next of neighbors) {
+          const edgeId = current < next ? `${current}-${next}` : `${next}-${current}`;
+          if (visitedEdges.has(edgeId)) continue;
+          if (blocked.has(next)) continue;
+
+          visitedEdges.add(edgeId);
+          const len = 1 + dfs(next, visitedEdges, blocked);
+          maxLen = Math.max(maxLen, len);
+          visitedEdges.delete(edgeId);
+        }
+
+        return maxLen;
+      }
+
+      let longest = 0;
+      Object.keys(graph).forEach(vertex => {
+        if (blockedVertices.has(vertex)) return;
+        const len = dfs(vertex, new Set(), blockedVertices);
+        longest = Math.max(longest, len);
+      });
+
+      playersRef.current[playerId].longestRoadLength = longest;
+
+      // Check if this is the new longest
+      let currentLeaderId = null;
+      let maxRoad = 5; // You need at least 5 to get Longest Road
+      for (const [id, p] of Object.entries(playersRef.current)) {
+        if (p.longestRoadLength > maxRoad) {
+          maxRoad = p.longestRoadLength;
+          currentLeaderId = id;
+        }
+      }
+
+      // Update hasLongestRoad
+      for (const id of Object.keys(playersRef.current)) {
+        playersRef.current[id].hasLongestRoad = (id === currentLeaderId);
+      }
+
+      setPlayers({ ...playersRef.current });
+      socket.emit("updatePlayers", { roomId, players: playersRef.current });
+
+      addGlobalLog(`Longest Road is now ${playersRef.current[currentLeaderId]?.playerName} with ${maxRoad} segments.`);
     }
 
     // move robber

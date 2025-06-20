@@ -45,6 +45,8 @@ io.on("connection", (socket) => {
             cities: [],
             roads: [],
             victoryPoints: 0,
+            hasLongestRoad: false,
+            longestRoadLength: 0,
         };
 
         games[roomId].players[socket.id] = player;
