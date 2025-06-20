@@ -66,6 +66,53 @@ io.on("connection", (socket) => {
         io.to(roomId).emit("boardUpdate", { gameState });
     });
 
+    //~ move robber
+    socket.on("moveRobber", ({ roomId, gameState }) => {
+        console.log(`Moving robber in room ${roomId}`, gameState);
+        
+        io.to(roomId).emit("boardUpdate", { gameState });
+    });
+
+    //~ rob a player
+    socket.on("robPlayer", ({ roomId, fromPlayerId, toPlayerId }) => {
+        const victim = games[roomId].players[fromPlayerId];
+        const thief = games[roomId].players[toPlayerId];
+
+        if (victim && thief) {
+            // Randomly select a resource to steal from victim
+            const resources = Object.keys(victim.playerResources).filter(
+                resource => victim.playerResources[resource] > 0
+            );
+
+            if (resources.length > 0) {
+                const stolenResource = resources[Math.floor(Math.random() * resources.length)];
+                thief.playerResources[stolenResource]++;
+                victim.playerResources[stolenResource] = Math.max(
+                    victim.playerResources[stolenResource] - 1,
+                    0
+                );
+
+                io.to(toPlayerId).emit("stolenResource", { stolenResource: stolenResource, fromPlayerId: fromPlayerId });
+                console.log(`Stole ${stolenResource} from ${fromPlayerId}`);
+            } else {
+                console.log(`No resources to steal from ${fromPlayerId}`);
+            }
+
+            io.to(roomId).emit("updatePlayers", { players: games[roomId].players });
+        }
+    });
+
+    //~ trading
+    socket.on("tradeOfferTo", ({ toPlayerId, offer }) => {
+        console.log(`Trade offer sent from ${socket.id} to ${toPlayerId}`, offer);
+
+        // Forward the offer to the receiving player
+        io.to(toPlayerId).emit("receiveTradeOffer", {
+            fromPlayerId: socket.id,
+            offer: offer
+        });
+    });
+
     //~ update player list
     socket.on("updatePlayers", ({ roomId, players }) => {
         console.log(`Updating players for room ${roomId}`, players);
@@ -73,6 +120,50 @@ io.on("connection", (socket) => {
         games[roomId].players = players;
 
         io.to(roomId).emit("updatePlayers", { players: games[roomId].players });
+    });
+
+    //~ finalize a trade
+    socket.on("finalizeTrade", ({ fromPlayerId, toPlayerId, offerA, offerB, roomId }) => {
+        const game = games[roomId];
+        if (!game) return;
+
+        const playerA = game.players[fromPlayerId];
+        const playerB = game.players[toPlayerId];
+
+        // Check resource sufficiency
+        const hasEnough = (player, offer) =>
+            Object.entries(offer).every(([res, amount]) => player.playerResources[res] >= amount);
+
+        if (!hasEnough(playerA, offerA) || !hasEnough(playerB, offerB)) {
+            console.log("Trade failed: not enough resources.");
+            return;
+        }
+
+        // Deduct offers
+        Object.entries(offerA).forEach(([res, amt]) => {
+            playerA.playerResources[res] -= amt;
+            playerB.playerResources[res] += amt;
+        });
+
+        Object.entries(offerB).forEach(([res, amt]) => {
+            playerB.playerResources[res] -= amt;
+            playerA.playerResources[res] += amt;
+        });
+
+        // Update all clients
+        io.to(roomId).emit("updatePlayers", { players: game.players });
+
+        // Notify both players
+        io.to(fromPlayerId).emit("globalLog", `Trade completed with ${playerB.playerName}.`);
+        io.to(toPlayerId).emit("globalLog", `Trade completed with ${playerA.playerName}.`);
+
+        io.to(fromPlayerId).emit("tradeCompleted");
+        io.to(toPlayerId).emit("tradeCompleted");
+    });
+
+    //~ global log
+    socket.on('globalLog', ({ roomId, message }) => {
+        io.to(roomId).emit('globalLog', message);
     });
 
     //~ handle turns
@@ -107,7 +198,7 @@ io.on("connection", (socket) => {
 
     //~ Getting player list
     socket.on("getPlayers", ({ roomId }) => {
-        const playerIds = Object.keys(games[roomId].players);
+        const playerIds = Object.keys(games[roomId]?.players);
         
         // Fisher-Yates shuffle
         for (let i = playerIds.length - 1; i > 0; i--) {

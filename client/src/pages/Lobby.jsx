@@ -23,7 +23,7 @@ export default function Lobby() {
 
     socket.on("updateLobby", (userDict) => {
       setUsers(userDict);
-      console.log("Users in lobby:", userDict);
+      // console.log("Users in lobby:", userDict);
     });
 
     return () => {

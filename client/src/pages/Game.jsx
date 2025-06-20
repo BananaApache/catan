@@ -13,7 +13,16 @@ export default function Game() {
   const [showDiscardUI, setShowDiscardUI] = useState(false);
   const [discardRequired, setDiscardRequired] = useState(0);
   const [victoryPoints, setVictoryPoints] = useState(0);
+  const [robberMovedThisTurn, setRobberMovedThisTurn] = useState(false);
+  const [playersToStealFrom, setPlayersToStealFrom] = useState([]);
+  const [showStealModal, setShowStealModal] = useState(false);
   const [showTradeUI, setShowTradeUI] = useState(false);
+  const [selectedPlayerId, setSelectedPlayerId] = useState(null);
+  const [myOffer, setMyOffer] = useState({});
+  const [theirOffer, setTheirOffer] = useState({});
+  const [iSubmitted, setISubmitted] = useState(false);
+  const [theySubmitted, setTheySubmitted] = useState(false);
+  const [incomingTrade, setIncomingTrade] = useState(null);
   const [gameState, setGameState] = useState({
     hexLayout: [],
     roads: new Set(),
@@ -38,10 +47,38 @@ export default function Game() {
   const isInitialPlacementRef = useRef(true);
   const diceRollRef = useRef("");
   const victoryPointsRef = useRef(0);
+  const robberMovedRef = useRef(false);
 
   const hexRadius = 60;
   const centerX = 400;
   const centerY = 350;
+
+  function addLog(message) {
+    const logBox = document.getElementById('logs');
+    if (!logBox) return;
+
+    const entry = document.createElement('div');
+    entry.textContent = `• ${message} (PERSONAL)`;
+    logBox.appendChild(entry);
+
+    // Scroll to the bottom
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+  function addGlobalLog(message) {
+    console.log(`Global Log: ${message}`);
+    socket.emit('globalLog', { roomId, message });
+  }
+  function addLogMessageToUI(message) {
+    const logBox = document.getElementById('logs');
+    if (!logBox) return;
+
+    const entry = document.createElement('div');
+    entry.textContent = `-> ${message} (GLOBAL)`;
+    logBox.appendChild(entry);
+
+    // Scroll to the bottom
+    logBox.scrollTop = logBox.scrollHeight;
+  }
 
   useEffect(() => {
 
@@ -51,7 +88,7 @@ export default function Game() {
       setPlayers(players);
       playersRef.current = players;
 
-      console.log(snakeOrder)
+      // console.log(snakeOrder)
       setupTurnOrderRef.current = snakeOrder;
       setInitialTurnIndex(0);
       initialTurnIndexRef.current = 0;
@@ -60,19 +97,45 @@ export default function Game() {
 
       playerOrderRef.current = playerOrder;
 
-      console.log("Players in game:", players);
+      // console.log("Players in game:", players);
     });
 
     socket.on('rollDice', ({ diceRoll }) => {
       setDiceRoll(diceRoll);
       diceRollRef.current = diceRoll;
+
+      addGlobalLog(`Player ${playersRef.current[currentTurnIdRef.current]?.playerName} rolled a ${diceRoll}`);
     });
+
+    socket.on("tradeOfferFrom", ({ fromPlayerId, offer }) => {
+      if (fromPlayerId === selectedPlayerId) {
+        setTheirOffer(offer);
+        setTheySubmitted(true);
+      }
+    });
+
+    socket.on("receiveTradeOffer", ({ fromPlayerId, offer }) => {
+      console.log("Received trade offer from", fromPlayerId, offer);
+      setSelectedPlayerId(fromPlayerId);  // Set the sender as the selected trade partner
+      setTheirOffer(offer);               // Show the sender's offer
+      setTheySubmitted(true);             // Mark them as having submitted
+      setShowTradeUI(true);
+    });
+
+    socket.on('globalLog', (message) => {
+      addLogMessageToUI(message);
+    });
+
+    socket.on('stolenResource', ({ stolenResource, fromPlayerId }) => {
+      console.log(`You stole "${stolenResource}" from Player ${playersRef.current[fromPlayerId]?.playerName}.`);
+      addLog(`You stole "${stolenResource}" from Player ${playersRef.current[fromPlayerId]?.playerName}.`);
+    })
 
     socket.on("updatePlayers", ({ players }) => {
       setPlayers(players);
       playersRef.current = players;
 
-      console.log("Updated players list:", players);
+      // console.log("Updated players list:", players);
     });
 
     socket.on('updateTurn', ({ currentTurnId }) => {
@@ -81,8 +144,12 @@ export default function Game() {
 
       setDiceRoll("");
       diceRollRef.current = "";
+
+      setRobberMovedThisTurn(false);
+      robberMovedRef.current = false;
       
-      console.log("Current turn updated to:", currentTurnId);
+      // console.log("Current turn updated to:", currentTurnId);
+      addGlobalLog(`It's now Player ${playersRef.current[currentTurnId]?.playerName}'s turn.`);
     });
 
     socket.on('updateInitialTurn', ({ currentTurnId, initialTurnIndex }) => {
@@ -96,8 +163,10 @@ export default function Game() {
       else {
         setInitialTurnIndex(initialTurnIndex);
         initialTurnIndexRef.current = initialTurnIndex;
-        console.log("Current turn updated to:", currentTurnId);
+        // console.log("Current turn updated to:", currentTurnId);
       }
+
+      addGlobalLog(`It's now Player ${playersRef.current[currentTurnId]?.playerName}'s turn.`);
     });
 
     socket.on('robber', ({ players }) => {
@@ -114,12 +183,22 @@ export default function Game() {
         setShowDiscardUI(true);
       }
 
-      console.log("Robber moved, updated players:", players);
+      // console.log("updated players:", players);
     })
 
+    socket.on("tradeCompleted", () => {
+      setShowTradeUI(false);
+      setISubmitted(false);
+      setTheySubmitted(false);
+      setMyOffer({});
+      setTheirOffer({});
+      setSelectedPlayerId(null);
+    });
+
     socket.on('boardUpdate', ({ gameState }) => {
-      // document.getElementById('road-layer').innerHTML = '';
-      // document.getElementById('settlement-layer').innerHTML = '';
+      document.getElementById('road-layer').innerHTML = '';
+      document.getElementById('settlement-layer').innerHTML = '';
+      document.querySelectorAll('circle').forEach(circle => {circle.style.fill = '';});
 
       const roads = gameState.roads;
       roads.forEach(road => {
@@ -168,8 +247,16 @@ export default function Game() {
         document.getElementById('settlement-layer').appendChild(newCity);
       });
 
+      const robber = gameState.robber;
+      if (robber) {
+        // console.log("Moving robber to hex:", robber);
+        document.querySelector(`polygon[points="${robber.hexPoints}"]`).nextSibling.nextSibling.style.fill = 'gray';
+      }
+
       setGameState(gameState);
       gameStateRef.current = gameState;
+
+      // console.log("Board updated with new game state:", gameState);
     })
 
     // Game state
@@ -215,7 +302,8 @@ export default function Game() {
     ];
     const updatedState = {
       ...gameStateRef.current,
-      hexLayout: hexLayout
+      hexLayout: hexLayout,
+
     };
 
     setGameState(updatedState);
@@ -267,119 +355,124 @@ export default function Game() {
 
     // Initialize board
     function initBoard() {
-        const hexLayer = document.getElementById('hex-layer');
-        const interactionLayer = document.getElementById('interaction-layer');
-        const allVertices = new Map();
-        const allEdges = new Map();
+      document.getElementById('hex-layer').innerHTML = '';
+      document.getElementById('interaction-layer').innerHTML = '';
+      document.getElementById('road-layer').innerHTML = '';
+      document.getElementById('settlement-layer').innerHTML = '';
 
-        // Create hexes
-        hexLayout.forEach(hex => {
-          const {x, y} = axialToPixel(hex.q, hex.r);
-          
-          // Create hex polygon with background color
-          const hexElement = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-          hexElement.setAttribute('points', getHexPoints(x, y));
-          hexElement.setAttribute('class', 'hex');
-          
-          // Set background colors for each resource type
-          const colors = {
-              brick: '#CD853F',
-              wood: '#228B22', 
-              wheat: '#DAA520',
-              stone: '#708090',
-              sheep: '#9ACD32',
-              desert: '#DEB887'
-          };
-          hexElement.setAttribute('fill', colors[hex.type] || '#4a7c59');
-          hexLayer.appendChild(hexElement);
+      const hexLayer = document.getElementById('hex-layer');
+      const interactionLayer = document.getElementById('interaction-layer');
+      const allVertices = new Map();
+      const allEdges = new Map();
 
-          // Add centered image for each hex type
-          const image = document.createElementNS('http://www.w3.org/2000/svg', 'image');
-          const imageSize = 120;
-          image.setAttribute('x', x - imageSize / 2);
-          image.setAttribute('y', y - imageSize / 2);
-          image.setAttribute('width', imageSize);
-          image.setAttribute('height', imageSize);
-          image.setAttribute('href', `/images/${hex.type}.png`);
-          image.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-          hexLayer.appendChild(image);
+      // Create hexes
+      hexLayout.forEach(hex => {
+        const {x, y} = axialToPixel(hex.q, hex.r);
+        
+        // Create hex polygon with background color
+        const hexElement = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        hexElement.setAttribute('points', getHexPoints(x, y));
+        hexElement.setAttribute('class', 'hex');
+        
+        // Set background colors for each resource type
+        const colors = {
+            brick: '#CD853F',
+            wood: '#228B22', 
+            wheat: '#DAA520',
+            stone: '#708090',
+            sheep: '#9ACD32',
+            desert: '#DEB887'
+        };
+        hexElement.setAttribute('fill', colors[hex.type] || '#4a7c59');
+        hexLayer.appendChild(hexElement);
 
-          // Add number token for resource hexes
-          if (hex.number) {
-            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-            circle.setAttribute('cx', x);
-            circle.setAttribute('cy', y);
-            circle.setAttribute('r', 18);
-            circle.setAttribute('class', 'number-circle');
-            circle.addEventListener('click', moveRobber);
-            hexLayer.appendChild(circle);
+        // Add centered image for each hex type
+        const image = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+        const imageSize = 120;
+        image.setAttribute('x', x - imageSize / 2);
+        image.setAttribute('y', y - imageSize / 2);
+        image.setAttribute('width', imageSize);
+        image.setAttribute('height', imageSize);
+        image.setAttribute('href', `/images/${hex.type}.png`);
+        image.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+        hexLayer.appendChild(image);
 
-            const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-            text.setAttribute('x', x);
-            text.setAttribute('y', y);
-            text.setAttribute('class', `number-text ${(hex.number === 6 || hex.number === 8) ? 'red-number' : ''}`);
-            text.textContent = hex.number;
-            hexLayer.appendChild(text);
-          }
-
-          // Collect vertices and edges
-          const vertices = getHexVertices(x, y);
-          const edges = getHexEdges(x, y);
-
-          vertices.forEach(vertex => {
-              allVertices.set(vertex.id, vertex);
-          });
-
-          edges.forEach(edge => {
-              allEdges.set(edge.id, edge);
-          });
-        });
-
-        // Create interactive vertex zones
-        allVertices.forEach(vertex => {
+        // Add number token for resource hexes
+        if (hex.number) {
           const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-          circle.setAttribute('cx', vertex.x);
-          circle.setAttribute('cy', vertex.y);
-          circle.setAttribute('r', 13);
-          circle.setAttribute('class', 'vertex-zone');
-          circle.setAttribute('data-vertex-id', vertex.id);
-          circle.addEventListener('click', handleVertexClick);
-          interactionLayer.appendChild(circle);
+          circle.setAttribute('cx', x);
+          circle.setAttribute('cy', y);
+          circle.setAttribute('r', 18);
+          circle.setAttribute('class', 'number-circle');
+          circle.addEventListener('click', moveRobber);
+          hexLayer.appendChild(circle);
+
+          const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          text.setAttribute('x', x);
+          text.setAttribute('y', y);
+          text.setAttribute('class', `number-text ${(hex.number === 6 || hex.number === 8) ? 'red-number' : ''}`);
+          text.textContent = hex.number;
+          hexLayer.appendChild(text);
+        }
+
+        // Collect vertices and edges
+        const vertices = getHexVertices(x, y);
+        const edges = getHexEdges(x, y);
+
+        vertices.forEach(vertex => {
+            allVertices.set(vertex.id, vertex);
         });
 
-        // Create interactive edge zones
-        allEdges.forEach(edge => {
-          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-          
-          const x1 = edge.start.x;
-          const y1 = edge.start.y;
-          const x2 = edge.end.x;
-          const y2 = edge.end.y;
-
-          const trim = 5; // how much to trim from each end
-
-          // Calculate unit vector
-          const dx = x2 - x1;
-          const dy = y2 - y1;
-          const len = Math.hypot(dx, dy);
-          const ux = dx / len;
-          const uy = dy / len;
-
-          // Apply trim
-          const tx1 = x1 + ux * trim;
-          const ty1 = y1 + uy * trim;
-          const tx2 = x2 - ux * trim;
-          const ty2 = y2 - uy * trim;
-
-          line.setAttribute('x1', tx1);
-          line.setAttribute('y1', ty1);
-          line.setAttribute('x2', tx2);
-          line.setAttribute('y2', ty2);
-          line.setAttribute('class', 'edge-zone');
-          line.setAttribute('data-edge-id', edge.id);
-          line.addEventListener('click', handleEdgeClick);
-          interactionLayer.appendChild(line);
+        edges.forEach(edge => {
+            allEdges.set(edge.id, edge);
         });
+      });
+
+      // Create interactive vertex zones
+      allVertices.forEach(vertex => {
+        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', vertex.x);
+        circle.setAttribute('cy', vertex.y);
+        circle.setAttribute('r', 13);
+        circle.setAttribute('class', 'vertex-zone');
+        circle.setAttribute('data-vertex-id', vertex.id);
+        circle.addEventListener('click', handleVertexClick);
+        interactionLayer.appendChild(circle);
+      });
+
+      // Create interactive edge zones
+      allEdges.forEach(edge => {
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        
+        const x1 = edge.start.x;
+        const y1 = edge.start.y;
+        const x2 = edge.end.x;
+        const y2 = edge.end.y;
+
+        const trim = 5; // how much to trim from each end
+
+        // Calculate unit vector
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        const len = Math.hypot(dx, dy);
+        const ux = dx / len;
+        const uy = dy / len;
+
+        // Apply trim
+        const tx1 = x1 + ux * trim;
+        const ty1 = y1 + uy * trim;
+        const tx2 = x2 - ux * trim;
+        const ty2 = y2 - uy * trim;
+
+        line.setAttribute('x1', tx1);
+        line.setAttribute('y1', ty1);
+        line.setAttribute('x2', tx2);
+        line.setAttribute('y2', ty2);
+        line.setAttribute('class', 'edge-zone');
+        line.setAttribute('data-edge-id', edge.id);
+        line.addEventListener('click', handleEdgeClick);
+        interactionLayer.appendChild(line);
+      });
     }
 
     // Handle vertex clicks (settlements)
@@ -398,7 +491,7 @@ export default function Game() {
           player.playerResources.wheat < 2 ||
           player.playerResources.stone < 3
         ) {
-          console.log("Not enough resources to upgrade to city.");
+          // console.log("Not enough resources to upgrade to city.");
           return;``
         }
 
@@ -407,11 +500,11 @@ export default function Game() {
         );
 
         if (!existingSettlement) {
-          console.log("No owned settlement to upgrade at this vertex.");
+          // console.log("No owned settlement to upgrade at this vertex.");
           return;
         }
 
-        console.log("Upgrading settlement to city at vertex:", vertexId);
+        // console.log("Upgrading settlement to city at vertex:", vertexId);
 
         // Remove existing settlement from DOM and list
         const settlementElem = document.querySelector(`[data-vertex-id="${vertexId}"].settlement`);
@@ -470,6 +563,8 @@ export default function Game() {
         setPlayers(updatedPlayersState);
         playersRef.current = updatedPlayersState;
 
+        addGlobalLog(`Player ${player.playerName} upgraded a settlement to a city.`);
+
         return;
       }
 
@@ -481,6 +576,7 @@ export default function Game() {
         playersRef.current[socket.id].playerResources.sheep < 1 ||
         playersRef.current[socket.id].playerResources.wheat < 1
       ) return; // not enough to build
+
       
       const vertexId = event.target.getAttribute('data-vertex-id');
       if (settlements.has(vertexId)) return; // Already has settlement
@@ -498,7 +594,7 @@ export default function Game() {
       });
 
       if (isTooClose) {
-        console.log("Too close to another settlement.");
+        // console.log("Too close to another settlement.");
         return;
       }
       
@@ -553,6 +649,8 @@ export default function Game() {
 
       setPlayers(updatedPlayersState);
       playersRef.current = updatedPlayersState;
+
+      addGlobalLog(`Player ${playersRef.current[socket.id].playerName} placed a settlement.`);
     }
 
     // Handle edge clicks (roads)
@@ -580,97 +678,149 @@ export default function Game() {
         (building.vertexId === start || building.vertexId === end)
       );
 
-    const ownsRoadConnected = (gameStateRef.current.roads || [])
-    .some(road => {
-      if (road.playerId !== socket.id) return false;
-      const [roadStart, roadEnd] = road.edgeId.split('-');
-      return (
-        roadStart === start ||
-        roadStart === end ||
-        roadEnd === start ||
-        roadEnd === end
-      );
-    });
+      const ownsRoadConnected = (gameStateRef.current.roads || [])
+      .some(road => {
+        if (road.playerId !== socket.id) return false;
+        const [roadStart, roadEnd] = road.edgeId.split('-');
+        return (
+          roadStart === start ||
+          roadStart === end ||
+          roadEnd === start ||
+          roadEnd === end
+        );
+      });
 
-    if (!ownsBuildingConnected && !ownsRoadConnected) {
-      console.log("Edge is not connected to your own building or road.");
-      return;
-    }
-
-    const [x1, y1] = start.split(',').map(Number);
-    const [x2, y2] = end.split(',').map(Number);
-
-    const trim = 5; // how much to trim from each end
-
-    // Calculate unit vector
-    const dx = x2 - x1;
-    const dy = y2 - y1;
-    const len = Math.hypot(dx, dy);
-    const ux = dx / len;
-    const uy = dy / len;
-
-    // Apply trim
-    const tx1 = x1 + ux * trim;
-    const ty1 = y1 + uy * trim;
-    const tx2 = x2 - ux * trim;
-    const ty2 = y2 - uy * trim;
-    
-    // Create road
-    const road = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    road.setAttribute('x1', tx1);
-    road.setAttribute('y1', ty1);
-    road.setAttribute('x2', tx2);
-    road.setAttribute('y2', ty2);
-    road.setAttribute('class', 'road');
-    road.setAttribute('data-edge-id', edgeId);
-    road.style.stroke = playersRef.current[socket.id].playerColor; // Use player's color
-    
-    // Add to road layer instead of main board
-    document.getElementById('road-layer').appendChild(road);
-    roads.add(edgeId);
-
-    const newRoad = {
-      tx1, ty1, tx2, ty2, edgeId,
-      color: playersRef.current[socket.id].playerColor,
-      playerId: socket.id
-    };
-
-    const updatedState = {
-      ...gameStateRef.current,
-      roads: [...gameStateRef.current.roads, newRoad]
-    };
-
-    setGameState(updatedState);
-    gameStateRef.current = updatedState;
-
-    const updatedPlayersState = {
-      ...playersRef.current,
-      [socket.id]: {
-        ...playersRef.current[socket.id],
-        playerResources: {
-          ...playersRef.current[socket.id].playerResources,
-          wood: playersRef.current[socket.id].playerResources.wood - 1,
-          brick: playersRef.current[socket.id].playerResources.brick - 1
-        },
-        roads: [...(playersRef.current[socket.id].roads || []), newRoad]
+      if (!ownsBuildingConnected && !ownsRoadConnected) {
+        // console.log("Edge is not connected to your own building or road.");
+        return;
       }
-    };
 
-    setPlayers(updatedPlayersState);
-    playersRef.current = updatedPlayersState;
+      const [x1, y1] = start.split(',').map(Number);
+      const [x2, y2] = end.split(',').map(Number);
+
+      const trim = 5; // how much to trim from each end
+
+      // Calculate unit vector
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const len = Math.hypot(dx, dy);
+      const ux = dx / len;
+      const uy = dy / len;
+
+      // Apply trim
+      const tx1 = x1 + ux * trim;
+      const ty1 = y1 + uy * trim;
+      const tx2 = x2 - ux * trim;
+      const ty2 = y2 - uy * trim;
+      
+      // Create road
+      const road = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      road.setAttribute('x1', tx1);
+      road.setAttribute('y1', ty1);
+      road.setAttribute('x2', tx2);
+      road.setAttribute('y2', ty2);
+      road.setAttribute('class', 'road');
+      road.setAttribute('data-edge-id', edgeId);
+      road.style.stroke = playersRef.current[socket.id].playerColor; // Use player's color
+      
+      // Add to road layer instead of main board
+      document.getElementById('road-layer').appendChild(road);
+      roads.add(edgeId);
+
+      const newRoad = {
+        tx1, ty1, tx2, ty2, edgeId,
+        color: playersRef.current[socket.id].playerColor,
+        playerId: socket.id
+      };
+
+      const updatedState = {
+        ...gameStateRef.current,
+        roads: [...gameStateRef.current.roads, newRoad]
+      };
+
+      setGameState(updatedState);
+      gameStateRef.current = updatedState;
+
+      const updatedPlayersState = {
+        ...playersRef.current,
+        [socket.id]: {
+          ...playersRef.current[socket.id],
+          playerResources: {
+            ...playersRef.current[socket.id].playerResources,
+            wood: playersRef.current[socket.id].playerResources.wood - 1,
+            brick: playersRef.current[socket.id].playerResources.brick - 1
+          },
+          roads: [...(playersRef.current[socket.id].roads || []), newRoad]
+        }
+      };
+
+      setPlayers(updatedPlayersState);
+      playersRef.current = updatedPlayersState;
+
+      addGlobalLog(`Player ${playersRef.current[socket.id].playerName} placed a road.`);
     }
 
     // move robber
     function moveRobber(event) {
       if (currentTurnIdRef.current !== socket.id) return; // Not current player's turn
       if (diceRollRef.current !== 7) return; // Only allow on dice roll or 7
+      if (robberMovedRef.current) return; // Robber already moved this turn
 
-      const hex = event.target;
-      const hexPoints = hex.getAttribute('points').split(' ').map(p => p.split(',').map(Number));
-      const centerX = (hexPoints[0][0] + hexPoints[3][0]) / 2;
-      const centerY = (hexPoints[0][1] + hexPoints[3][1]) / 2;
+      setRobberMovedThisTurn(true);
+      robberMovedRef.current = true;
 
-      console.log(hexPoints, centerX, centerY);
+      const robberCircle = event.target;
+      const hex = event.target.previousSibling.previousElementSibling;
+
+      if (!hex || !hex.getAttribute('points')) return;
+
+      // console.log(hex);
+      const hexPoints = hex.getAttribute('points');
+      const hexPointsArray = hexPoints.split(' ').map(p => p.split(',').map(n => Math.round(Number(n))));
+
+      // console.log(hexPoints);
+
+      const updatedGameState = {
+        ...gameStateRef.current,
+        robber: {
+          hexPoints: hexPoints,
+          movedBy: socket.id
+        }
+      };
+      setGameState(updatedGameState);
+      gameStateRef.current = updatedGameState;
+
+      const touchingPlayers = [];
+
+      console.log("Hex vertices:", hexPointsArray);
+
+      const buildings = [
+        ...(gameStateRef.current.settlements || []),
+        ...(gameStateRef.current.cities || [])
+      ];
+
+      console.log("Buildings on board:", buildings);
+
+      hexPointsArray.forEach(vertex => {
+        const vx = vertex[0];
+        const vy = vertex[1];
+        const key = `${vx},${vy}`;
+
+        buildings.forEach(building => {
+          if (building.vertexId === key) {
+            if (!touchingPlayers.includes(building.playerId) && building.playerId !== socket.id) {
+              touchingPlayers.push(building.playerId);
+            }
+          }
+        });
+      });
+
+      setPlayersToStealFrom(touchingPlayers);
+      setShowStealModal(true);
+
+      console.log("Touching buildings:", touchingPlayers);
+
+      socket.emit('moveRobber', { roomId, hexPoints: hexPoints, gameState: gameStateRef.current });
     }
 
     // Initialize the board
@@ -683,7 +833,12 @@ export default function Game() {
       socket.off('updateTurn');
       socket.off('updateInitialTurn');
       socket.off('rollDice');
-      socket.off('robber');      
+      socket.off('robber');  
+      socket.off('globalLog');
+      socket.off('stolenResource');
+      socket.off("tradeOfferFrom");
+      socket.off("receiveTradeOffer")
+      socket.off("tradeCompleted");
     }
   }, []);
 
@@ -711,12 +866,13 @@ export default function Game() {
       hexLayout: gameStateRef.current.hexLayout.map(hex => ({ ...hex })),
       roads: Array.from(gameStateRef.current.roads),
       settlements: Array.from(gameStateRef.current.settlements),
-      cities: Array.from(gameStateRef.current.cities)
+      cities: Array.from(gameStateRef.current.cities),
+      robber: gameStateRef.current.robber ? { ...gameStateRef.current.robber } : null
     };
 
     socket.emit('updateBoard', { roomId, gameState: serializableGameState });
 
-    console.log("New board updated:", gameStateRef.current);
+    // console.log("New board updated:", gameStateRef.current);
 
     if (isInitialPlacement) { // still in initial placement phase
       const nextIndex = initialTurnIndexRef.current + 1;
@@ -730,9 +886,9 @@ export default function Game() {
         socket.emit('updateTurn', { roomId, currentTurnId: firstNormalPlayer, players: playersRef.current });
 
         //~ add all resources to players
-        console.log("Game State:", gameStateRef.current);
+        // console.log("Game State:", gameStateRef.current);
         const settlementsArray = gameStateRef.current.settlements || [];
-        console.log("Settlements on board:", settlementsArray);
+        // console.log("Settlements on board:", settlementsArray);
 
         settlementsArray.forEach(settlement => {
           const vertexId = settlement.vertexId;
@@ -740,7 +896,7 @@ export default function Game() {
 
           const touchingHexes = [];
 
-          console.log(gameStateRef.current);
+          // console.log(gameStateRef.current);
 
           gameStateRef.current.hexLayout?.forEach(hex => {
             const { x: cx, y: cy } = axialToPixel(hex.q, hex.r);
@@ -755,7 +911,7 @@ export default function Game() {
             }
           });
 
-          console.log(touchingHexes)
+          // console.log(touchingHexes)
 
           touchingHexes.forEach(hex => {
             // Find playerId by color
@@ -767,24 +923,24 @@ export default function Game() {
               // Update the resources for the correct player
               playersRef.current[playerId].playerResources[hex.type] += 1;
 
-              console.log(hex.type, "gained by player", playerId);
+              // console.log(hex.type, "gained by player", playerId);
             }
           });
         });
 
         setPlayers({...playersRef.current});
 
-        console.log(playersRef.current);
+        // console.log(playersRef.current);
 
         socket.emit('updatePlayers', { roomId, players: playersRef.current });
         socket.emit('updateInitialTurn', { roomId, currentTurnId: firstNormalPlayer, players: playersRef.current, initialTurnIndex: -1 });
 
       } else { // still in initial placement
         const nextPlayerId = setupTurnOrderRef.current[nextIndex];
-        console.log("DEBUG");
-        console.log("nextIndex", nextIndex);
-        console.log("setupTurnOrderRef", setupTurnOrderRef.current);
-        console.log("nextPlayerId", nextPlayerId);
+        // console.log("DEBUG");
+        // console.log("nextIndex", nextIndex);
+        // console.log("setupTurnOrderRef", setupTurnOrderRef.current);
+        // console.log("nextPlayerId", nextPlayerId);
         setInitialTurnIndex(nextIndex);
         initialTurnIndexRef.current = nextIndex;
         setCurrentTurnId(nextPlayerId);
@@ -794,7 +950,7 @@ export default function Game() {
       }
     } 
     else { // normal phase
-      console.log("Normal turn order, moving to next player");
+      // console.log("Normal turn order, moving to next player");
       
       nextTurn(); 
     }
@@ -831,14 +987,14 @@ export default function Game() {
   function rollDice() {
     if (currentTurnIdRef.current !== socket.id) return; // Not current player's turn
 
-    // document.querySelector("#dice-btn").remove() // Disable button after rolling
+    // document.querySelector("#dice-btn").remove() // Disable button after rolling (for debugging purposes)
 
     const myDiceRoll = Math.floor(Math.random() * 6) + 1 + Math.floor(Math.random() * 6) + 1; // Roll two dice
 
-    console.log("Dice rolled:", myDiceRoll);
+    // console.log("Dice rolled:", myDiceRoll);
 
     if (myDiceRoll === 7) {
-      console.log("Rolled a 7! Moving the robber.");
+      // console.log("Rolled a 7! Moving the robber.");
 
       socket.emit('robber', { roomId, players: playersRef.current });
     }
@@ -853,7 +1009,7 @@ export default function Game() {
 
     // Create a copy of current player's resources to modify
     const updatedResources = { ...playersRef.current[socket.id].playerResources };
-    console.log("Resource gains before rolling:", updatedResources);
+    // console.log("Resource gains before rolling:", updatedResources);
 
     allBuildings.forEach(building => {
       const vertexId = building.vertexId;
@@ -875,7 +1031,7 @@ export default function Game() {
 
       touchingHexes.forEach(hex => {
         if (hex.number === myDiceRoll && hex.type !== 'desert') {
-          console.log(`${building.type} matched hex:`, hex);
+          // console.log(`${building.type} matched hex:`, hex);
 
           const playerId = Object.keys(playersRef.current).find(
             id => playersRef.current[id].playerColor === playerColor
@@ -885,7 +1041,7 @@ export default function Game() {
             const gain = building.type === 'city' ? 2 : 1;
             playersRef.current[playerId].playerResources[hex.type] += gain;
 
-            console.log(`${hex.type} +${gain} to player ${playerId}`);
+            // console.log(`${hex.type} +${gain} to player ${playerId}`);
           }
         }
       });
@@ -926,7 +1082,7 @@ export default function Game() {
     });
 
     if (isTooClose) {
-      console.log("Too close to another settlement.");
+      // console.log("Too close to another settlement.");
       return;
     }
     
@@ -974,6 +1130,8 @@ export default function Game() {
 
     setPlayers(updatedPlayersState);
     playersRef.current = updatedPlayersState;
+
+    addGlobalLog(`Player ${playersRef.current[socket.id].playerName} placed a settlement.`);
   }
 
   function placeFirstRoad(event) {
@@ -1008,7 +1166,7 @@ export default function Game() {
     });
 
     if (!ownsBuildingConnected && !ownsRoadConnected) {
-      console.log("Edge is not connected to your own building or road.");
+      // console.log("Edge is not connected to your own building or road.");
       return;
     }
 
@@ -1068,6 +1226,8 @@ export default function Game() {
 
     setPlayers(updatedPlayersState);
     playersRef.current = updatedPlayersState;
+
+    addGlobalLog(`Player ${playersRef.current[socket.id].playerName} placed a road.`);
   }
 
   function updateDiscard(resource, delta) {
@@ -1078,7 +1238,7 @@ export default function Game() {
   }
 
   function submitDiscard() {
-    console.log("Submitting discarded resources:", discardedResources);
+    // console.log("Submitting discarded resources:", discardedResources);
 
     const updatedResources = { ...players[socket.id].playerResources };
     Object.keys(discardedResources).forEach(resource => {
@@ -1097,19 +1257,52 @@ export default function Game() {
     socket.emit('updatePlayers', { roomId, players: playersRef.current });
 
     setShowDiscardUI(false);
+
+    addGlobalLog(`Player ${players[socket.id].playerName} discarded resources: ${JSON.stringify(discardedResources)}`);
   }
 
-  function trade() {
-    console.log("trade initiated")
+  function robPlayer(targetPlayerId) {
+    setShowStealModal(false);
 
-  
+    socket.emit('robPlayer', {
+      roomId,
+      fromPlayerId: targetPlayerId,
+      toPlayerId: socket.id
+    });
+
+    addGlobalLog(`Player ${players[socket.id].playerName} stole a resource from ${players[targetPlayerId].playerName}.`);
+  }
+
+  function trade(playerId) {
+    setSelectedPlayerId(playerId);
+    setShowTradeUI(true);
+    document.querySelector('#trade-players').classList.remove('show');
+  }
+
+  function canAffordTrade(offer, resources) {
+    return Object.entries(offer).every(([res, amt]) => (resources[res] || 0) >= amt);
   }
 
   return (
     <>
     <style>
       {`
+        #logs {
+          width: 300px;
+          height: 100px;
+          overflow-y: auto;
+          border: 1px solid #ccc;
+          padding: 5px;
+          font-size: 12px;
+          background-color: #f9f9f9;
+          white-space: pre-wrap;
+        }
+        
         .show {
+          display: block !important;
+        }
+
+        #trade-players {
           display: none;
         }
 
@@ -1242,11 +1435,11 @@ export default function Game() {
     }
     <p>Victory Points: { players[socket.id]?.victoryPoints }</p>
     { diceRoll !== "" && players[currentTurnId]?.playerName && (
-      <p id="logs">
-        <span id="dice-roll">Player {players[currentTurnId]?.playerName} rolled a {diceRoll}</span>
-      </p>
+      <span id="dice-roll">Player {players[currentTurnId]?.playerName} rolled a {diceRoll}</span>
     )
     }
+
+    <p id="logs"></p>
 
     {showDiscardUI && (
       <div className="modal">
@@ -1271,6 +1464,81 @@ export default function Game() {
       </div>
     )}
 
+    {showStealModal && (
+      <div className="steal-modal">
+        <h3>Select a player to steal from:</h3>
+        {playersToStealFrom.map(playerId => (
+          <button
+            key={playerId}
+            onClick={() => robPlayer(playerId)}
+          >
+            {players[playerId]?.playerName || 'Unknown Player'}
+          </button>
+        ))}
+      </div>
+    )}
+
+    {showTradeUI && (
+      <div style={{ border: '1px solid #ccc', padding: '16px', background: '#f0f0f0', width: '300px', marginTop: '20px' }}>
+        <h3>Trade With: {players[selectedPlayerId]?.playerName || selectedPlayerId}</h3>
+
+        <div style={{ marginBottom: '10px' }}>
+          <strong>Your Offer:</strong>
+          {['wood', 'brick', 'sheep', 'wheat', 'stone'].map(resource => (
+            <div key={resource}>
+              {resource}:{' '}
+              <input
+                type="number"
+                min="0"
+                style={{ width: '50px' }}
+                value={myOffer[resource] || 0}
+                onChange={(e) =>
+                  setMyOffer(prev => ({ ...prev, [resource]: Math.max(0, parseInt(e.target.value) || 0) }))
+                }
+              />
+            </div>
+          ))}
+          {!iSubmitted && (
+            <button disabled={!canAffordTrade(myOffer, players[socket.id]?.playerResources || {}) || Object.values(myOffer).every(val => val === 0 || !val)} onClick={() => {
+              socket.emit("tradeOfferTo", { toPlayerId: selectedPlayerId, offer: myOffer });
+              setISubmitted(true);
+            }}>
+              Submit Offer
+            </button>
+          )}
+        </div>
+
+        <div style={{ marginBottom: '10px' }}>
+          <strong>Their Offer:</strong>
+          {['wood', 'brick', 'sheep', 'wheat', 'stone'].map(resource => (
+            <div key={resource}>
+              {resource}: {theirOffer[resource] || 0}
+            </div>
+          ))}
+        </div>
+
+        <button
+          disabled={!(iSubmitted && theySubmitted)}
+          onClick={() => {
+            socket.emit("finalizeTrade", {
+              fromPlayerId: socket.id,
+              toPlayerId: selectedPlayerId,
+              offerA: myOffer,
+              offerB: theirOffer,
+              roomId
+            });
+            setISubmitted(false);
+            setTheySubmitted(false);
+            setShowTradeUI(false);
+            setMyOffer({});
+            setTheirOffer({});
+          }}
+        >
+          Confirm Trade
+        </button>
+      </div>
+    )}
+
     <svg id="board" width="800" height="700" viewBox="0 0 800 700">
         <defs></defs>
         <g id="hex-layer"></g>
@@ -1279,7 +1547,7 @@ export default function Game() {
         <g id="settlement-layer"></g>
     </svg>
 
-    <div id="trade-players" className='show'>
+    <div id="trade-players">
       <p>Trade with Other Players</p>
         {Object.keys(players).filter(id => id !== socket.id).map(playerId => (
           <li key={playerId}>
@@ -1303,7 +1571,7 @@ export default function Game() {
             <button id="road-btn" className={currentMode === 'road' ? 'active' : ''} onClick={() => { currentModeRef.current = 'road'; setCurrentMode('road'); }}>Place Road</button>
             <button id="road-btn" className={currentMode === 'city' ? 'active' : ''} onClick={() => { currentModeRef.current = 'city'; setCurrentMode('city'); }}>Place City</button>
             <button id="dice-btn" onClick={rollDice}>Roll Dice</button>
-            <button id="dice-btn" onClick={document.querySelector("#trade-players").classList.toggle('show')}>Trade</button>
+            <button id="dice-btn" onClick={() => {document.querySelector("#trade-players").classList.add('show')}}>Trade</button>
             <button id="submit-btn" onClick={ updateBoard }>End Turn</button>  
           </>)
         }
