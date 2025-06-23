@@ -808,7 +808,7 @@ export default function Game() {
 
       // Check if this is the new longest
       let currentLeaderId = null;
-      let maxRoad = 5; // You need at least 5 to get Longest Road
+      let maxRoad = 4; // You need at least 5 to get Longest Road
       for (const [id, p] of Object.entries(playersRef.current)) {
         if (p.longestRoadLength > maxRoad) {
           maxRoad = p.longestRoadLength;
@@ -1294,6 +1294,8 @@ export default function Game() {
     setPlayers(updatedPlayersState);
     playersRef.current = updatedPlayersState;
 
+    checkForLongestRoad(socket.id);
+
     addGlobalLog(`Player ${playersRef.current[socket.id].playerName} placed a road.`);
   }
 
@@ -1501,6 +1503,8 @@ export default function Game() {
       </>
     }
     <p>Victory Points: { players[socket.id]?.victoryPoints }</p>
+    <p>Longest Road Length: { players[socket.id]?.longestRoadLength }</p>
+
     { diceRoll !== "" && players[currentTurnId]?.playerName && (
       <span id="dice-roll">Player {players[currentTurnId]?.playerName} rolled a {diceRoll}</span>
     )
